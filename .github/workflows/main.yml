@@ -6,21 +6,30 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 350
 
     steps:
       - name: Configure Core RDP Settings
         run: |
+          # Habilita o Remote Desktop e remove exigência de NLA para compatibilidade
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          
+          # Abre a porta 3389 no Firewall do Windows
           netsh advfirewall firewall add rule name="RDP-Static" dir=in action=allow protocol=TCP localport=3389
+          
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Credentials
         run: |
+          # IMPORTANTE: Usando aspas simples ('') para que os caracteres especiais da senha 
+          # que você configurou (como &, !, () ) sejam lidos apenas como texto.
           $user = '${{ secrets.RDP_USER }}'
           $pass = '${{ secrets.RDP_PASSWORD }}'
+          
           $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
+          
+          # Cria o usuário e adiciona aos grupos de Admin e RDP
           New-LocalUser -Name $user -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
@@ -34,179 +43,26 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
+          # Conecta ao Tailscale usando seu Hostname fixo e Auth Key
+          # A flag --overlap ajuda a assumir o lugar se o nó anterior ainda constar como ativo
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
+          
           $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: Install Python for backup script
-        run: |
-          choco install python -y --no-progress
-          refreshenv
-          pip install requests
-
-      - name: Write Terabox backup script
-        run: |
-          @'
-          import os, time, requests, hashlib, json
-          from pathlib import Path
-          from datetime import datetime
-
-          CSRF_TOKEN = os.environ["TERABOX_CSRF"]
-
-          HEADERS = {
-              "Cookie": f"csrfToken={CSRF_TOKEN}",
-              "X-CSRFToken": CSRF_TOKEN,
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          }
-
-          BACKUP_DIRS = [
-              r"C:\Users\runneradmin\Downloads",
-              r"C:\Users\${{ secrets.RDP_USER }}\Downloads",
-              r"C:\Program Files",
-              r"C:\Program Files (x86)",
-              r"C:\Users\${{ secrets.RDP_USER }}\AppData\Roaming",
-          ]
-
-          SKIP_EXTENSIONS = {".tmp", ".log", ".etl", ".evtx", ".pf"}
-          MAX_FILE_MB     = 4000
-          UPLOADED_CACHE  = r"C:\uploaded_hashes.json"
-
-          def load_cache():
-              if os.path.exists(UPLOADED_CACHE):
-                  with open(UPLOADED_CACHE) as f:
-                      return json.load(f)
-              return {}
-
-          def save_cache(cache):
-              with open(UPLOADED_CACHE, "w") as f:
-                  json.dump(cache, f)
-
-          def file_hash(path):
-              h = hashlib.md5()
-              with open(path, "rb") as f:
-                  for chunk in iter(lambda: f.read(8192), b""):
-                      h.update(chunk)
-              return h.hexdigest()
-
-          def terabox_upload(local_path, remote_path):
-              size = os.path.getsize(local_path)
-
-              # Pre-create
-              pre = requests.post(
-                  "https://www.terabox.com/api/precreate",
-                  headers=HEADERS,
-                  data={
-                      "path": remote_path,
-                      "size": size,
-                      "isdir": 0,
-                      "autoinit": 1,
-                      "block_list": "[]",
-                  }
-              )
-              if pre.status_code != 200:
-                  return False
-
-              upload_id = pre.json().get("uploadid")
-
-              # Upload
-              with open(local_path, "rb") as f:
-                  data = f.read()
-
-              up = requests.post(
-                  "https://c-jp.terabox.com/rest/2.0/pcs/superfile2",
-                  params={
-                      "method": "upload",
-                      "path": remote_path,
-                      "uploadid": upload_id,
-                      "partseq": 0,
-                  },
-                  headers=HEADERS,
-                  files={"file": ("blob", data, "application/octet-stream")},
-              )
-              if up.status_code != 200:
-                  return False
-
-              block_md5 = up.json().get("md5", "")
-
-              # Finaliza
-              create = requests.post(
-                  "https://www.terabox.com/api/create",
-                  headers=HEADERS,
-                  data={
-                      "path": remote_path,
-                      "size": size,
-                      "isdir": 0,
-                      "uploadid": upload_id,
-                      "block_list": f'["{block_md5}"]',
-                  }
-              )
-              return create.status_code == 200
-
-          def collect_files():
-              files = []
-              seen = set()
-              for d in BACKUP_DIRS:
-                  p = Path(d)
-                  if not p.exists():
-                      continue
-                  for f in p.rglob("*"):
-                      if f.is_file() and f.suffix.lower() not in SKIP_EXTENSIONS:
-                          if str(f) not in seen:
-                              seen.add(str(f))
-                              if f.stat().st_size / (1024**2) <= MAX_FILE_MB:
-                                  files.append(f)
-              return files
-
-          def main():
-              cache = load_cache()
-              start = time.time()
-              MAX_RUNTIME = 350 * 60  # 350 min, encerra 10 min antes
-
-              while True:
-                  if time.time() - start >= MAX_RUNTIME:
-                      print("[BACKUP] 350 min atingidos — encerrando com segurança.")
-                      break
-
-                  print(f"[{datetime.now().strftime('%H:%M:%S')}] Varrendo arquivos...")
-                  files = collect_files()
-                  novos = 0
-
-                  for f in files:
-                      try:
-                          h = file_hash(f)
-                          if cache.get(str(f)) == h:
-                              continue
-                          remote = "/RDP-Backup" + str(f).replace("\\", "/").replace("C:", "")
-                          if terabox_upload(str(f), remote):
-                              cache[str(f)] = h
-                              novos += 1
-                              print(f"  ✓ {f.name}")
-                          else:
-                              print(f"  ✗ {f.name}")
-                      except Exception as e:
-                          print(f"  ! Erro: {e}")
-
-                  save_cache(cache)
-                  print(f"  → {novos} arquivo(s) enviado(s). Aguardando 5 min...\n")
-                  time.sleep(300)
-
-          if __name__ == "__main__":
-              main()
-          '@ | Out-File -Encoding utf8 C:\backup_terabox.py
-
-      - name: Show connection info
+      
+      - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
           Write-Host "   RDP PRONTO PARA CONEXÃO"
           Write-Host "==============================="
-          Write-Host "IP Tailscale : $env:TAILSCALE_IP"
-          Write-Host "Usuário      : ${{ secrets.RDP_USER }}"
-          Write-Host "Hostname     : ${{ secrets.TS_HOSTNAME }}"
-          Write-Host "Backup       : a cada 5 min → Terabox /RDP-Backup"
-          Write-Host "Encerra em   : ~350 min (10 min antes do limite)"
+          Write-Host "Endereço IP: $env:TAILSCALE_IP"
+          Write-Host "Usuário: ${{ secrets.RDP_USER }}"
+          Write-Host "Senha: (A que você definiu no Secret)"
+          Write-Host "Hostname: ${{ secrets.TS_HOSTNAME }}"
           Write-Host "===============================`n"
-
-      - name: Run backup loop
-        env:
-          TERABOX_CSRF: ${{ secrets.TERABOX_CSRF }}
-        run: python C:\backup_terabox.py
+          
+          # Loop para manter o Runner vivo por até 6 horas
+          while ($true) {
+              Write-Host "[$(Get-Date)] Runner Ativo - Aguardando conexão..."
+              Start-Sleep -Seconds 300
+          }
