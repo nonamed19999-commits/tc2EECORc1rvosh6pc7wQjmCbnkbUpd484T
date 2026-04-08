@@ -11,44 +11,31 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Habilita o Remote Desktop e remove exigência de NLA
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          
-          # Abre a porta 3389 no Firewall
           netsh advfirewall firewall add rule name="RDP-Static" dir=in action=allow protocol=TCP localport=3389
-          
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Credentials
+      - name: Create RDP User
         run: |
           $user = '${{ secrets.RDP_USER }}'
           $pass = '${{ secrets.RDP_PASSWORD }}'
-          
           $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
-          
-          # Cria o usuário e adiciona aos grupos
           New-LocalUser -Name $user -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
 
-      - name: Setup RustDesk 1.4.6 (Anti-Desalinhamento)
+      - name: Setup AnyDesk (Instant)
         run: |
-          # Baixa a versão estável 1.4.6
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.4.6/rustdesk-1.4.6-x86_64.exe" -OutFile "rustdesk.exe"
+          # Download direto e rápido
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "AnyDesk.exe"
           
-          # Instala silenciosamente como serviço
-          Start-Process ./rustdesk.exe -ArgumentList "--install" -Wait
+          # Configura a senha sem instalar drivers pesados
+          echo '${{ secrets.RDP_PASSWORD }}' | ./AnyDesk.exe --set-password
           
-          # Pequena pausa para o serviço subir
-          Start-Sleep -Seconds 5
-          
-          # Define a senha do RustDesk (usando a mesma do seu Secret)
-          & "C:\Program Files\RustDesk\rustdesk.exe" --password '${{ secrets.RDP_PASSWORD }}'
-          
-          # Captura o ID gerado
-          $rustId = & "C:\Program Files\RustDesk\rustdesk.exe" --get-id
-          echo "RUSTDESK_ID=$rustId" >> $env:GITHUB_ENV
+          # Captura o ID e joga no log
+          $anyId = ./AnyDesk.exe --get-id
+          echo "ANYDESK_ID=$anyId" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -59,25 +46,18 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Conecta ao seu Tailscale
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
-          
           $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
-          Write-Host "   SISTEMA PRONTO (CPU EPYC)"
-          Write-Host "==============================="
-          Write-Host "TAILSCALE IP: $env:TAILSCALE_IP"
-          Write-Host "RUSTDESK ID: $env:RUSTDESK_ID"
-          Write-Host "USUÁRIO: ${{ secrets.RDP_USER }}"
-          Write-Host "SENHA: (A que você definiu no Secret)"
+          Write-Host "   ID ANYDESK: $env:ANYDESK_ID"
+          Write-Host "   IP TAILSCALE: $env:TAILSCALE_IP"
           Write-Host "===============================`n"
           
-          # Loop para manter a VM viva
           while ($true) {
-              Write-Host "[$(Get-Date)] Runner Ativo - Aguardando conexão..."
+              Write-Host "[$(Get-Date)] Online..."
               Start-Sleep -Seconds 300
           }
