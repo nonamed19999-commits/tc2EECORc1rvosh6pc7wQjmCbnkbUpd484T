@@ -11,25 +11,16 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Habilita o Remote Desktop e remove exigência de NLA para compatibilidade
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          
-          # Abre a porta 3389 no Firewall do Windows
           netsh advfirewall firewall add rule name="RDP-Static" dir=in action=allow protocol=TCP localport=3389
-          
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Credentials
         run: |
-          # IMPORTANTE: Usando aspas simples ('') para que os caracteres especiais da senha 
-          # que você configurou (como &, !, () ) sejam lidos apenas como texto.
           $user = '${{ secrets.RDP_USER }}'
           $pass = '${{ secrets.RDP_PASSWORD }}'
-          
           $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
-          
-          # Cria o usuário e adiciona aos grupos de Admin e RDP
           New-LocalUser -Name $user -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
@@ -43,13 +34,109 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Conecta ao Tailscale usando seu Hostname fixo e Auth Key
-          # A flag --overlap ajuda a assumir o lugar se o nó anterior ainda constar como ativo
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
-          
           $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+
+      - name: Install Python Dependencies
+        run: pip install requests
+
+      - name: Start Telegram Backup Monitor
+        run: |
+          $script = @'
+          import os, requests, time, json
+          from pathlib import Path
+          from datetime import datetime
+
+          TOKEN = "${{ secrets.TELEGRAM_TOKEN }}"
+          CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
+
+          WATCH = [
+              "C:\\Users",
+              os.path.join(os.environ.get("USERPROFILE", "C:\\Users\\runneradmin"), "Downloads")
+          ]
+
+          SENT_LOG = "C:\\sent_files.json"
+          IGNORE_EXT = {".tmp",".log",".lnk",".ini",".db",".sys",".dll",".mui",".pf",".etl"}
+          IGNORE_DIRS = {"Windows","Program Files","ProgramData","AppData\\Local\\Temp"}
+          MAX_BYTES = 1900 * 1024 * 1024  # 1.9GB limite seguro Telegram
+
+          def load_sent():
+              try:
+                  with open(SENT_LOG) as f:
+                      return json.load(f)
+              except:
+                  return {}
+
+          def save_sent(data):
+              with open(SENT_LOG, "w") as f:
+                  json.dump(data, f)
+
+          def send_file(path):
+              size = os.path.getsize(path)
+              if size == 0 or size > MAX_BYTES:
+                  print(f"[!] Ignorando {path} - vazio ou grande demais ({size/1e6:.1f}MB)")
+                  return False
+              try:
+                  with open(path, "rb") as f:
+                      r = requests.post(
+                          f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+                          data={"chat_id": CHAT_ID, "caption": f"📦 {os.path.basename(path)}\n{size/1e6:.1f} MB"},
+                          files={"document": f},
+                          timeout=300
+                      )
+                  return r.status_code == 200
+              except Exception as e:
+                  print(f"[!] Erro enviando {path}: {e}")
+                  return False
+
+          def send_message(text):
+              requests.post(
+                  f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                  data={"chat_id": CHAT_ID, "text": text}
+              )
+
+          # Arquivo de teste inicial
+          test_path = "C:\\rdp_backup_teste.txt"
+          with open(test_path, "w") as f:
+              f.write(f"✅ Monitor iniciado em {datetime.now()}\nRDPFiles bot funcionando!")
+          send_file(test_path)
+          send_message("🟢 Monitor de backup iniciado! Arquivos novos serão enviados automaticamente.")
+
+          start_time = time.time()
+          sent = load_sent()
+          print("[*] Monitorando pastas...")
+
+          while True:
+              for watch_root in WATCH:
+                  if not os.path.exists(watch_root):
+                      continue
+                  for root, dirs, files in os.walk(watch_root):
+                      dirs[:] = [d for d in dirs if not any(ig in os.path.join(root, d) for ig in IGNORE_DIRS)]
+                      for fname in files:
+                          ext = Path(fname).suffix.lower()
+                          if ext in IGNORE_EXT:
+                              continue
+                          fpath = os.path.join(root, fname)
+                          try:
+                              if os.path.getmtime(fpath) < start_time:
+                                  continue
+                              if fpath in sent:
+                                  continue
+                              print(f"[+] Novo arquivo: {fpath}")
+                              if send_file(fpath):
+                                  sent[fpath] = datetime.now().isoformat()
+                                  save_sent(sent)
+                                  print(f"[✓] Enviado: {fname}")
+                          except:
+                              pass
+              time.sleep(30)
+          '@
+
+          $script | Out-File -FilePath "C:\backup_monitor.py" -Encoding UTF8
+          Start-Process python -ArgumentList "C:\backup_monitor.py" -WindowStyle Hidden
+          Write-Host "[*] Monitor de backup iniciado em background"
+
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
@@ -57,11 +144,8 @@ jobs:
           Write-Host "==============================="
           Write-Host "Endereço IP: $env:TAILSCALE_IP"
           Write-Host "Usuário: ${{ secrets.RDP_USER }}"
-          Write-Host "Senha: (A que você definiu no Secret)"
           Write-Host "Hostname: ${{ secrets.TS_HOSTNAME }}"
           Write-Host "===============================`n"
-          
-          # Loop para manter o Runner vivo por até 6 horas
           while ($true) {
               Write-Host "[$(Get-Date)] Runner Ativo - Aguardando conexão..."
               Start-Sleep -Seconds 300
