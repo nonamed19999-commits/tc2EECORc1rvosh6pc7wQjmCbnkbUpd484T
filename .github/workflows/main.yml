@@ -25,22 +25,26 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
 
-      - name: Setup AnyDesk (Fixed)
+      - name: Setup AnyDesk (Bulletproof ID)
         run: |
           Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "AnyDesk.exe"
-          
-          # Instala como serviço silenciosamente (necessário para rodar sem sessão gráfica e gerar ID)
           Start-Process -FilePath ".\AnyDesk.exe" -ArgumentList "--install `"C:\AnyDesk`" --start-with-win --silent" -Wait
-          
-          # Dá tempo para o serviço subir e conectar à rede do AnyDesk
-          Start-Sleep -Seconds 12
+          Start-Sleep -Seconds 5
           
           # Define a senha
           echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk\AnyDesk.exe" --set-password
           
-          # Captura o ID agora que o serviço está ativo
-          $anyId = & "C:\AnyDesk\AnyDesk.exe" --get-id
-          echo "ANYDESK_ID=$anyId" >> $env:GITHUB_ENV
+          # Loop de até 60 segundos esperando o ID ser gerado
+          $id = ""
+          $count = 0
+          while ([string]::IsNullOrWhiteSpace($id) -and $count -lt 15) {
+              Start-Sleep -Seconds 4
+              & "C:\AnyDesk\AnyDesk.exe" --get-id | Out-File -FilePath id.txt -Encoding ascii
+              $id = (Get-Content id.txt -ErrorAction SilentlyContinue) -join ""
+              $count++
+          }
+          
+          echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
