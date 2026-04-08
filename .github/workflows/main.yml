@@ -1,5 +1,4 @@
 name: RDP
-
 on:
   workflow_dispatch:
 
@@ -50,49 +49,40 @@ jobs:
           CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
           DEST = os.path.join(os.environ.get("USERPROFILE"), "Downloads")
 
-          def restore_last_session():
-              url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+          def restore():
               try:
-                  updates = requests.get(url).json().get("result", [])
-                  last_session_id = None
-                  # Localiza o ID da última sessão ativa
+                  updates = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates").json().get("result", [])
+                  last_id = None
                   for up in reversed(updates):
-                      msg = up.get("message", {})
-                      caption = msg.get("caption", "")
-                      if "SESSION_ID:" in caption:
-                          last_session_id = caption.split("SESSION_ID:")[1].strip()
+                      cap = up.get("message", {}).get("caption", "")
+                      if "SESSION_ID:" in cap:
+                          last_id = cap.split("SESSION_ID:")[1].strip()
                           break
-                  
-                  if not last_session_id: return
-                  
-                  # Baixa apenas arquivos marcados com esse ID
+                  if not last_id: return
                   for up in reversed(updates):
                       msg = up.get("message", {})
-                      if "document" in msg and last_session_id in msg.get("caption", ""):
-                          file_id = msg["document"]["file_id"]
+                      if "document" in msg and last_id in msg.get("caption", ""):
+                          fid = msg["document"]["file_id"]
                           name = msg["document"]["file_name"]
-                          f_info = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}").json()
-                          dl_url = f"https://api.telegram.org/file/bot{TOKEN}/{f_info['result']['file_path']}"
-                          with requests.get(dl_url) as r, open(os.path.join(DEST, name), "wb") as f:
-                              f.write(r.content)
+                          info = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={fid}").json()
+                          url = f"https://api.telegram.org/file/bot{TOKEN}/{info['result']['file_path']}"
+                          with requests.get(url) as r, open(os.path.join(DEST, name), "wb") as f: f.write(r.content)
               except: pass
-
           if not os.path.exists(DEST): os.makedirs(DEST)
-          restore_last_session()
+          restore()
           '@
           $script | Out-File -FilePath "C:\restore.py" -Encoding UTF8
           python "C:\restore.py"
 
-      - name: Start Background Backup Monitor
+      - name: Start Advanced Background Monitor
         run: |
           $script = @'
           import os, requests, time
           TOKEN = "${{ secrets.TELEGRAM_TOKEN }}"
           CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
           RUN_ID = "${{ github.run_id }}"
-          USER_PATH = os.environ.get("USERPROFILE")
-          WATCH = [os.path.join(USER_PATH, "Documents"), os.path.join(USER_PATH, "Downloads")]
-
+          WATCH = [os.path.join(os.environ.get("USERPROFILE"), "Documents"), os.path.join(os.environ.get("USERPROFILE"), "Downloads")]
+          
           def send_file(path):
               try:
                   with open(path, "rb") as f:
@@ -102,29 +92,28 @@ jobs:
               except: pass
 
           sent = set()
-          start_time = time.time()
           while True:
               for folder in WATCH:
                   if not os.path.exists(folder): continue
                   for root, _, files in os.walk(folder):
-                      if any(x in root for x in ["AppData", "Local", "Temp"]): continue
+                      # Filtro rigoroso contra lixo do Windows
+                      if any(x in root for x in ["AppData", "Local", "Temp", "Microsoft", "Searches"]): continue
                       for fname in files:
+                          # Ignora extensões de sistema que poluem o Telegram
+                          if fname.lower().endswith(('.dic', '.url', '.search-ms', '.lnk', '.ini', '.db')): continue
                           fpath = os.path.join(root, fname)
                           try:
-                              if os.path.getmtime(fpath) > start_time and fpath not in sent:
+                              # Envia se for novo nesta sessão, independente da data de modificação
+                              if fpath not in sent and os.path.getsize(fpath) > 0:
                                   send_file(fpath)
                                   sent.add(fpath)
                           except: pass
-              time.sleep(30)
+              time.sleep(20)
           '@
           $script | Out-File -FilePath "C:\backup_monitor.py" -Encoding UTF8
           Start-Process python -ArgumentList "C:\backup_monitor.py" -WindowStyle Hidden
 
       - name: Maintain Connection
         run: |
-          Write-Host "==============================="
-          Write-Host "   SISTEMA ONLINE" 
-          Write-Host "==============================="
-          Write-Host "Persistência de arquivos: ATIVA"
-          Write-Host "Logs de monitoramento: SILENCIADOS"
+          Write-Host "RDP Ativa. Monitor de persistência rodando em background."
           while ($true) { Start-Sleep -Seconds 300 }
