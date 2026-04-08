@@ -25,17 +25,24 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
 
-      - name: Setup AnyDesk (Instant)
+      - name: Setup AnyDesk
         run: |
-          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "AnyDesk.exe"
-          
-          # Define a senha silenciosamente
-          echo '${{ secrets.RDP_PASSWORD }}' | ./AnyDesk.exe --set-password
-          
-          # Espera o AnyDesk gerar o ID (essencial para não vir vazio)
-          Start-Sleep -Seconds 10
-          
-          $anyId = ./AnyDesk.exe --get-id
+          # Baixa o AnyDesk
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "C:\AnyDesk.exe"
+
+          # Instala como serviço
+          Start-Process "C:\AnyDesk.exe" -ArgumentList "--install C:\AnyDesk --start-with-windows" -Wait
+          Start-Sleep -Seconds 5
+
+          # Garante que o serviço está rodando
+          Start-Service -Name AnyDesk -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 15
+
+          # Define a senha de acesso
+          echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk\AnyDesk.exe" --set-password
+
+          # Pega o ID (agora o processo está rodando)
+          $anyId = & "C:\AnyDesk\AnyDesk.exe" --get-id
           echo "ANYDESK_ID=$anyId" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
@@ -48,7 +55,7 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
-      
+
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
@@ -57,7 +64,7 @@ jobs:
           Write-Host "ANYDESK ID: $env:ANYDESK_ID"
           Write-Host "USUÁRIO: ${{ secrets.RDP_USER }}"
           Write-Host "===============================`n"
-          
+
           while ($true) {
               Write-Host "[$(Get-Date)] Online - AnyDesk ativo..."
               Start-Sleep -Seconds 300
