@@ -1,4 +1,4 @@
-name: RDP-Static
+name: RDP
 
 on:
   workflow_dispatch:
@@ -42,90 +42,78 @@ jobs:
       - name: Install Python Dependencies
         run: pip install requests
 
-      - name: Restore Files from Telegram
+      - name: Restore Previous Session Files
         run: |
           $script = @'
           import requests, os
           TOKEN = "${{ secrets.TELEGRAM_TOKEN }}"
           CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
-          DEST = os.path.join(os.environ.get("USERPROFILE", "C:\\Users\\runneradmin"), "Downloads")
+          DEST = os.path.join(os.environ.get("USERPROFILE"), "Downloads")
 
-          def get_latest_files():
+          def restore_last_session():
               url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
               try:
-                  r = requests.get(url).json()
-                  if not r.get("ok"): return
-                  # Pega as últimas 5 mensagens para garantir que não perdeu nada
-                  for result in reversed(r.get("result", [])):
-                      msg = result.get("message", {})
-                      if "document" in msg:
+                  updates = requests.get(url).json().get("result", [])
+                  last_session_id = None
+                  # Localiza o ID da última sessão ativa
+                  for up in reversed(updates):
+                      msg = up.get("message", {})
+                      caption = msg.get("caption", "")
+                      if "SESSION_ID:" in caption:
+                          last_session_id = caption.split("SESSION_ID:")[1].strip()
+                          break
+                  
+                  if not last_session_id: return
+                  
+                  # Baixa apenas arquivos marcados com esse ID
+                  for up in reversed(updates):
+                      msg = up.get("message", {})
+                      if "document" in msg and last_session_id in msg.get("caption", ""):
                           file_id = msg["document"]["file_id"]
-                          file_name = msg["document"]["file_name"]
-                          # Busca o link do arquivo
+                          name = msg["document"]["file_name"]
                           f_info = requests.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}").json()
-                          f_path = f_info["result"]["file_path"]
-                          download_url = f"https://api.telegram.org/file/bot{TOKEN}/{f_path}"
-                          
-                          with requests.get(download_url, stream=True) as dl:
-                              with open(os.path.join(DEST, file_name), "wb") as f:
-                                  for chunk in dl.iter_content(chunk_size=8192): f.write(chunk)
-                  print("✅ Restauração concluída.")
-              except Exception as e: print(f"Erro no restore: {e}")
+                          dl_url = f"https://api.telegram.org/file/bot{TOKEN}/{f_info['result']['file_path']}"
+                          with requests.get(dl_url) as r, open(os.path.join(DEST, name), "wb") as f:
+                              f.write(r.content)
+              except: pass
 
           if not os.path.exists(DEST): os.makedirs(DEST)
-          get_latest_files()
+          restore_last_session()
           '@
           $script | Out-File -FilePath "C:\restore.py" -Encoding UTF8
           python "C:\restore.py"
 
-      - name: Start Telegram Backup Monitor (Silent)
+      - name: Start Background Backup Monitor
         run: |
           $script = @'
-          import os, requests, time, json
-          from pathlib import Path
-
+          import os, requests, time
           TOKEN = "${{ secrets.TELEGRAM_TOKEN }}"
           CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
-          WATCH = [ "C:\\Users", os.path.join(os.environ.get("USERPROFILE", "C:\\Users\\runneradmin"), "Downloads") ]
-          SENT_LOG = "C:\\sent_files.json"
-          IGNORE_EXT = {".tmp",".log",".lnk",".ini",".db",".sys",".dll",".mui",".pf",".etl"}
-          IGNORE_DIRS = {"Windows","Program Files","ProgramData","AppData\\Local\\Temp"}
-          MAX_BYTES = 1900 * 1024 * 1024
-
-          def load_sent():
-              try:
-                  with open(SENT_LOG) as f: return json.load(f)
-              except: return {}
-
-          def save_sent(data):
-              with open(SENT_LOG, "w") as f: json.dump(data, f)
+          RUN_ID = "${{ github.run_id }}"
+          USER_PATH = os.environ.get("USERPROFILE")
+          WATCH = [os.path.join(USER_PATH, "Documents"), os.path.join(USER_PATH, "Downloads")]
 
           def send_file(path):
-              size = os.path.getsize(path)
-              if size == 0 or size > MAX_BYTES: return False
               try:
                   with open(path, "rb") as f:
                       requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
-                          data={"chat_id": CHAT_ID, "caption": f"📦 {os.path.basename(path)}"},
+                          data={"chat_id": CHAT_ID, "caption": f"SESSION_ID:{RUN_ID}"},
                           files={"document": f}, timeout=300)
-                  return True
-              except: return False
+              except: pass
 
+          sent = set()
           start_time = time.time()
-          sent = load_sent()
           while True:
-              for watch_root in WATCH:
-                  if not os.path.exists(watch_root): continue
-                  for root, dirs, files in os.walk(watch_root):
-                      dirs[:] = [d for d in dirs if not any(ig in os.path.join(root, d) for ig in IGNORE_DIRS)]
+              for folder in WATCH:
+                  if not os.path.exists(folder): continue
+                  for root, _, files in os.walk(folder):
+                      if any(x in root for x in ["AppData", "Local", "Temp"]): continue
                       for fname in files:
-                          if Path(fname).suffix.lower() in IGNORE_EXT: continue
                           fpath = os.path.join(root, fname)
                           try:
                               if os.path.getmtime(fpath) > start_time and fpath not in sent:
-                                  if send_file(fpath):
-                                      sent[fpath] = time.time()
-                                      save_sent(sent)
+                                  send_file(fpath)
+                                  sent.add(fpath)
                           except: pass
               time.sleep(30)
           '@
@@ -134,5 +122,9 @@ jobs:
 
       - name: Maintain Connection
         run: |
-          Write-Host "Runner Online. Sistema ativo."
+          Write-Host "==============================="
+          Write-Host "   SISTEMA ONLINE" 
+          Write-Host "==============================="
+          Write-Host "Persistência de arquivos: ATIVA"
+          Write-Host "Logs de monitoramento: SILENCIADOS"
           while ($true) { Start-Sleep -Seconds 300 }
