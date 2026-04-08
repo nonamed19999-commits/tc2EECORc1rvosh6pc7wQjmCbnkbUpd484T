@@ -16,7 +16,7 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Static" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User
+      - name: Create RDP User with Fixed Credentials
         run: |
           $user = '${{ secrets.RDP_USER }}'
           $pass = '${{ secrets.RDP_PASSWORD }}'
@@ -27,22 +27,16 @@ jobs:
 
       - name: Setup AnyDesk
         run: |
-          # Baixa o AnyDesk
           Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "C:\AnyDesk.exe"
-
-          # Instala como serviço
           Start-Process "C:\AnyDesk.exe" -ArgumentList "--install C:\AnyDesk --start-with-windows" -Wait
           Start-Sleep -Seconds 5
-
-          # Garante que o serviço está rodando
           Start-Service -Name AnyDesk -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 15
-
-          # Define a senha de acesso
           echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk\AnyDesk.exe" --set-password
-
-          # Pega o ID (agora o processo está rodando)
-          $anyId = & "C:\AnyDesk\AnyDesk.exe" --get-id
+          $anyId = & "C:\AnyDesk\AnyDesk.exe" --get-id 2>$null
+          if (-not $anyId) {
+            $anyId = & "$env:APPDATA\AnyDesk\AnyDesk.exe" --get-id 2>$null
+          }
           echo "ANYDESK_ID=$anyId" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
@@ -55,17 +49,22 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
-          Write-Host "   SISTEMA PRONTO (ANYDESK)"
+          Write-Host "   RDP PRONTO PARA CONEXÃO"
           Write-Host "==============================="
           Write-Host "ANYDESK ID: $env:ANYDESK_ID"
-          Write-Host "USUÁRIO: ${{ secrets.RDP_USER }}"
+          Write-Host "Endereço IP: $env:TAILSCALE_IP"
+          Write-Host "Usuário: ${{ secrets.RDP_USER }}"
+          Write-Host "Senha: (A que você definiu no Secret)"
+          Write-Host "Hostname: ${{ secrets.TS_HOSTNAME }}"
           Write-Host "===============================`n"
-
+          
           while ($true) {
-              Write-Host "[$(Get-Date)] Online - AnyDesk ativo..."
+              Write-Host "[$(Get-Date)] Runner Ativo - Aguardando conexão..."
               Start-Sleep -Seconds 300
           }
