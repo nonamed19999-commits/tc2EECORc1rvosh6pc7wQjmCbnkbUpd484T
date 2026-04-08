@@ -11,28 +11,44 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Habilita o Remote Desktop e remove exigência de NLA para compatibilidade
+          # Habilita o Remote Desktop e remove exigência de NLA
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           
-          # Abre a porta 3389 no Firewall do Windows
+          # Abre a porta 3389 no Firewall
           netsh advfirewall firewall add rule name="RDP-Static" dir=in action=allow protocol=TCP localport=3389
           
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Credentials
         run: |
-          # IMPORTANTE: Usando aspas simples ('') para que os caracteres especiais da senha 
-          # que você configurou (como &, !, () ) sejam lidos apenas como texto.
           $user = '${{ secrets.RDP_USER }}'
           $pass = '${{ secrets.RDP_PASSWORD }}'
           
           $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
           
-          # Cria o usuário e adiciona aos grupos de Admin e RDP
+          # Cria o usuário e adiciona aos grupos
           New-LocalUser -Name $user -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+
+      - name: Setup RustDesk 1.4.6 (Anti-Desalinhamento)
+        run: |
+          # Baixa a versão estável 1.4.6
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.4.6/rustdesk-1.4.6-x86_64.exe" -OutFile "rustdesk.exe"
+          
+          # Instala silenciosamente como serviço
+          Start-Process ./rustdesk.exe -ArgumentList "--install" -Wait
+          
+          # Pequena pausa para o serviço subir
+          Start-Sleep -Seconds 5
+          
+          # Define a senha do RustDesk (usando a mesma do seu Secret)
+          & "C:\Program Files\RustDesk\rustdesk.exe" --password '${{ secrets.RDP_PASSWORD }}'
+          
+          # Captura o ID gerado
+          $rustId = & "C:\Program Files\RustDesk\rustdesk.exe" --get-id
+          echo "RUSTDESK_ID=$rustId" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -43,8 +59,7 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Conecta ao Tailscale usando seu Hostname fixo e Auth Key
-          # A flag --overlap ajuda a assumir o lugar se o nó anterior ainda constar como ativo
+          # Conecta ao seu Tailscale
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
           
           $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
@@ -53,15 +68,15 @@ jobs:
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
-          Write-Host "   RDP PRONTO PARA CONEXÃO"
+          Write-Host "   SISTEMA PRONTO (CPU EPYC)"
           Write-Host "==============================="
-          Write-Host "Endereço IP: $env:TAILSCALE_IP"
-          Write-Host "Usuário: ${{ secrets.RDP_USER }}"
-          Write-Host "Senha: (A que você definiu no Secret)"
-          Write-Host "Hostname: ${{ secrets.TS_HOSTNAME }}"
+          Write-Host "TAILSCALE IP: $env:TAILSCALE_IP"
+          Write-Host "RUSTDESK ID: $env:RUSTDESK_ID"
+          Write-Host "USUÁRIO: ${{ secrets.RDP_USER }}"
+          Write-Host "SENHA: (A que você definiu no Secret)"
           Write-Host "===============================`n"
           
-          # Loop para manter o Runner vivo por até 6 horas
+          # Loop para manter a VM viva
           while ($true) {
               Write-Host "[$(Get-Date)] Runner Ativo - Aguardando conexão..."
               Start-Sleep -Seconds 300
