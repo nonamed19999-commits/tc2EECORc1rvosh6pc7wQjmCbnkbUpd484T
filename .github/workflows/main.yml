@@ -28,15 +28,11 @@ jobs:
       - name: Setup AnyDesk
         run: |
           Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "C:\AnyDesk.exe"
-          Start-Process "C:\AnyDesk.exe" -ArgumentList "--install C:\AnyDesk --start-with-windows" -Wait
-          Start-Sleep -Seconds 5
-          Start-Service -Name AnyDesk -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 15
-          echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk\AnyDesk.exe" --set-password
-          $anyId = & "C:\AnyDesk\AnyDesk.exe" --get-id 2>$null
-          if (-not $anyId) {
-            $anyId = & "$env:APPDATA\AnyDesk\AnyDesk.exe" --get-id 2>$null
-          }
+          Start-Process "C:\AnyDesk.exe" -NoNewWindow
+          Start-Sleep -Seconds 20
+          echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk.exe" --set-password
+          $anyId = & "C:\AnyDesk.exe" --get-id 2>$null
+          Write-Host "ANYDESK ID: $anyId"
           echo "ANYDESK_ID=$anyId" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
