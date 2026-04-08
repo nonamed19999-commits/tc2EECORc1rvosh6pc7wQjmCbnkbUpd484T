@@ -16,7 +16,7 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Static" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Credentials
+      - name: Create RDP User
         run: |
           $user = '${{ secrets.RDP_USER }}'
           $pass = '${{ secrets.RDP_PASSWORD }}'
@@ -25,14 +25,21 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
 
-      - name: Setup AnyDesk
+      - name: Setup AnyDesk (Fixed)
         run: |
-          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "C:\AnyDesk.exe"
-          Start-Process "C:\AnyDesk.exe" -NoNewWindow
-          Start-Sleep -Seconds 20
-          echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk.exe" --set-password
-          $anyId = & "C:\AnyDesk.exe" --get-id 2>$null
-          Write-Host "ANYDESK ID: $anyId"
+          Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "AnyDesk.exe"
+          
+          # Instala como serviço silenciosamente (necessário para rodar sem sessão gráfica e gerar ID)
+          Start-Process -FilePath ".\AnyDesk.exe" -ArgumentList "--install `"C:\AnyDesk`" --start-with-win --silent" -Wait
+          
+          # Dá tempo para o serviço subir e conectar à rede do AnyDesk
+          Start-Sleep -Seconds 12
+          
+          # Define a senha
+          echo '${{ secrets.RDP_PASSWORD }}' | & "C:\AnyDesk\AnyDesk.exe" --set-password
+          
+          # Captura o ID agora que o serviço está ativo
+          $anyId = & "C:\AnyDesk\AnyDesk.exe" --get-id
           echo "ANYDESK_ID=$anyId" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
@@ -45,22 +52,17 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=${{ secrets.TS_HOSTNAME }} --accept-routes
-          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
+      
       - name: Maintain Connection
         run: |
           Write-Host "`n==============================="
-          Write-Host "   RDP PRONTO PARA CONEXÃO"
+          Write-Host "   SISTEMA PRONTO (ANYDESK)"
           Write-Host "==============================="
           Write-Host "ANYDESK ID: $env:ANYDESK_ID"
-          Write-Host "Endereço IP: $env:TAILSCALE_IP"
-          Write-Host "Usuário: ${{ secrets.RDP_USER }}"
-          Write-Host "Senha: (A que você definiu no Secret)"
-          Write-Host "Hostname: ${{ secrets.TS_HOSTNAME }}"
+          Write-Host "USUÁRIO: ${{ secrets.RDP_USER }}"
           Write-Host "===============================`n"
           
           while ($true) {
-              Write-Host "[$(Get-Date)] Runner Ativo - Aguardando conexão..."
+              Write-Host "[$(Get-Date)] Online - AnyDesk ativo..."
               Start-Sleep -Seconds 300
           }
